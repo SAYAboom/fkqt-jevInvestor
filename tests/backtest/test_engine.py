@@ -71,7 +71,7 @@ async def test_warmup_produces_no_records_or_target_calls() -> None:
     for wd in warmup_days:
         days[wd] = make_replay_day(
             decision_date=wd,
-            planned_execution_date=wd + timedelta(days=1),
+            planned_execution_date=d1,
             features={},
         )
     days[d1] = make_replay_day(decision_date=d1, planned_execution_date=d2)
