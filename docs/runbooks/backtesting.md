@@ -34,27 +34,41 @@ uv run pyright
 - 不随平台转换换行：实现用字节写入，保证 Windows 与 Linux 写出的字节完全一致，
   否则同一份结果在两处写出的哈希会对不上。
 
+两个哈希的覆盖范围：
+
+- `config_hash`：`BacktestConfig` 全部字段的规范化 JSON 的 SHA-256；
+- `result_hash`：完整 `BacktestResult` 的规范化 JSON 的 SHA-256，计算前从
+  `summary` 中排除 `result_hash` 字段（`config_hash` 保留在预映像中）。
+
 ## 4. 错误码表
 
 | 错误码 | 触发条件 |
 |---|---|
 | INVALID_BACKTEST_WINDOW | 起始日期晚于结束日期 |
 | DECISION_DATES_NOT_STRICTLY_ORDERED | 决策日未严格升序或存在重复 |
-| REPLAY_DAY_DATE_MISMATCH | 回放日的决策日期与请求不符；或决策日晚于计划执行日；或截止时间不在决策日当天（后两者错误码待确认） |
+| REPLAY_DAY_DATE_MISMATCH | 回放日的决策日期与请求不符 |
+| EXECUTION_DATE_NOT_AFTER_DECISION_DATE | 计划执行日不晚于决策日 |
+| DECISION_CUTOFF_DATE_MISMATCH | 截止时间不落在决策日当天 |
 | POINT_IN_TIME_VIOLATION | 某特征值的 as_of 晚于决策截止时间 |
 | TARGET_DATE_MISMATCH | 目标批次的决策日或计划执行日与当天不符 |
 | TARGET_EXPERIMENT_ARM_MISMATCH | 目标批次的实验组与配置不符 |
 | TARGET_SIZING_VERSION_MISMATCH | 目标仓位的 sizing_version 与配置不符 |
+| TARGET_SYMBOL_COVERAGE_MISMATCH | 目标批次未恰好覆盖特征证券与当前持仓证券 |
 | EMPTY_BACKTEST_WINDOW | 决策日为空 |
+| INSUFFICIENT_WARMUP_DATA | 预热日不足、乱序、重复或晚于起始日 |
+| PORTFOLIO_EQUITY_DEPLETED | 执行结果总权益归零 |
 
 四组运行器在公平性检查失败时抛 `BacktestError`，消息以
-`EXPERIMENT_CONFIG_MISMATCH` 开头（该错误码不在八个稳定错误码之列，待确认）。
+`EXPERIMENT_CONFIG_MISMATCH` 开头。
 
-## 5. 已知边界
+## 5. 预热期与实现状态
 
-- 预热期尚未实现：`warmup_trading_days` 暂不参与计算，等契约答复。
-- 结果哈希尚未实现：`config_hash` / `result_hash` 当前是 64 位占位值，等契约答复。
-- 逐日记录里的累计收益与回撤当前是占位值（0），等契约答复。
+预热期已实现：引擎按 `warmup_trading_days` 读取并校验起始日之前的预热日
+（决策日一致、执行日在后、截止时间当天、特征不晚于截止时间），但预热期不产生
+逐日记录、不调用目标生成器与执行端口、不重算特征、不推进权益与运行峰值。
+
+累计收益与回撤由 `build_daily_record` 按初始资金与运行峰值计算；结果哈希由
+`summarize` 计算。
 
 ## 6. 四组实验
 
@@ -63,5 +77,6 @@ uv run pyright
 - C：确定性因子 → Jev 概率 → 规则方向 → 仓位引擎
 - D：确定性因子 → 规则方向 → 仓位引擎（纯规则基线）
 
-本模块只提供引擎与四组运行器；四组各自的真实 `TargetProvider` 由核心项目在
-后续阶段提供。
+本模块只提供引擎与四组运行器；四组各自的真实 `TargetProvider`、基于冻结快照的
+数据适配器、目标批次到执行域的版本化映射，以及生产执行端口适配器，均由核心项目
+在后续阶段提供。
