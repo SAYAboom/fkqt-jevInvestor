@@ -138,3 +138,36 @@ def test_factories_produce_valid_data() -> None:
 def test_replay_day_cutoff_follows_decision_date() -> None:
     day = make_replay_day(decision_date=date(2026, 1, 9))
     assert day.decision_cutoff.date() == date(2026, 1, 9)
+
+
+async def test_warmup_dates_returns_count() -> None:
+    d0 = date(2026, 1, 2)
+    d1 = date(2026, 1, 3)
+    d2 = date(2026, 1, 4)
+    before = date(2026, 1, 5)
+    provider = FakeReplayProvider(
+        days={
+            d0: make_replay_day(decision_date=d0),
+            d1: make_replay_day(decision_date=d1),
+            d2: make_replay_day(decision_date=d2),
+        }
+    )
+    result = await provider.warmup_dates(before, 3)
+    assert result == (d0, d1, d2)
+
+
+async def test_warmup_dates_returns_fewer_when_short() -> None:
+    d0 = date(2026, 1, 4)
+    before = date(2026, 1, 5)
+    provider = FakeReplayProvider(days={d0: make_replay_day(decision_date=d0)})
+    result = await provider.warmup_dates(before, 3)
+    assert result == (d0,)
+    assert len(result) < 3
+
+
+async def test_warmup_dates_zero_count_returns_empty() -> None:
+    d0 = date(2026, 1, 4)
+    before = date(2026, 1, 5)
+    provider = FakeReplayProvider(days={d0: make_replay_day(decision_date=d0)})
+    result = await provider.warmup_dates(before, 0)
+    assert result == ()

@@ -345,6 +345,12 @@ class FakeReplayProvider:
             self._decision_dates = tuple(decision_dates)
         self.decision_dates_calls: list[tuple[date, date]] = []
         self.load_day_calls: list[date] = []
+        self.warmup_dates_calls: list[tuple[date, int]] = []
+
+    async def warmup_dates(self, before: date, count: int) -> tuple[date, ...]:
+        self.warmup_dates_calls.append((before, count))
+        candidates = sorted(item for item in self._decision_dates if item < before)
+        return tuple(candidates[:count])
 
     async def decision_dates(self, start: date, end: date) -> tuple[date, ...]:
         self.decision_dates_calls.append((start, end))
