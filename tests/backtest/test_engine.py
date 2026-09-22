@@ -1,17 +1,18 @@
-"""回测引擎验收测试（契约第 9 节 12 条）。
+"""回测引擎验收测试。
 
-引擎尚未实现，本批测试先立靶子：除预热期（第 2 条）与结果哈希（第 8 条）占位外，
-其余 10 条现在应全部为红。期望值按规格 2026-09-22-engine-tests-spec.md 手工计算。
+覆盖契约的 13 个稳定错误码、预热期、决策视图隔离、结果哈希与确定性。
+期望值按规格手工计算。
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from fkqt_jevinvestor.backtest.engine import BacktestEngine, BacktestError
 from fkqt_jevinvestor.backtest.runner import run_experiment_arms
-from fkqt_jevinvestor.domain.backtest import ExperimentArm
+from fkqt_jevinvestor.backtest.serialization import canonical_result_json
+from fkqt_jevinvestor.domain.backtest import DecisionAction, ExperimentArm, ReplayDay
 from tests.backtest.fixtures import (
     DEFAULT_SYMBOL,
     FakeExecutionPort,
@@ -28,6 +29,10 @@ from tests.backtest.fixtures import (
 )
 
 
+def _keep_target() -> object:
+    return make_target_position(symbol=DEFAULT_SYMBOL, action=DecisionAction.KEEP)
+
+
 async def test_two_day_normal_backtest() -> None:
     d1 = date(2026, 1, 5)
     d2 = date(2026, 1, 6)
@@ -40,24 +45,46 @@ async def test_two_day_normal_backtest() -> None:
     )
     targets = FakeTargetProvider(
         batches={
-            d1: make_target_batch(decision_date=d1, planned_execution_date=d2),
-            d2: make_target_batch(decision_date=d2, planned_execution_date=d3),
+            d1: make_target_batch(decision_date=d1, planned_execution_date=d2, targets=(_keep_target(),)),
+            d2: make_target_batch(decision_date=d2, planned_execution_date=d3, targets=(_keep_target(),)),
         }
     )
     port = FakeExecutionPort(results=(make_execution_result(), make_execution_result()))
     engine = BacktestEngine(replay=replay, targets=targets, execution=port)
     result = await engine.run(make_config(start_date=d1, end_date=d2))
     assert len(result.daily_records) == 2
-    # 资产恒等式：总权益 = 现金 + 市值，误差不超过 0.01
     for record in result.daily_records:
         assert abs(record.total_equity - (record.cash_balance + record.market_value)) <= Decimal("0.01")
 
 
-@pytest.mark.skip(
-    reason="预热期语义未定：ReplayDataProvider 没有接口能表达'起始日之前的 N 个交易日'，待契约答复方案 A/B"
-)
 async def test_warmup_produces_no_records_or_target_calls() -> None:
-    """预期：预热期数据被加载但不产生逐日记录，也不调用目标生成器（契约第 5 节步骤 3）。"""
+    d1 = date(2026, 1, 5)
+    d2 = date(2026, 1, 6)
+    d3 = date(2026, 1, 7)
+    warmup_days = [d1 - timedelta(days=60 - i) for i in range(60)]
+    days: dict[date, ReplayDay] = {}
+    for wd in warmup_days:
+        days[wd] = make_replay_day(
+            decision_date=wd,
+            planned_execution_date=wd + timedelta(days=1),
+            features={},
+        )
+    days[d1] = make_replay_day(decision_date=d1, planned_execution_date=d2)
+    days[d2] = make_replay_day(decision_date=d2, planned_execution_date=d3)
+    replay = FakeReplayProvider(days=days)
+    targets = FakeTargetProvider(
+        batches={
+            d1: make_target_batch(decision_date=d1, planned_execution_date=d2, targets=(_keep_target(),)),
+            d2: make_target_batch(decision_date=d2, planned_execution_date=d3, targets=(_keep_target(),)),
+        }
+    )
+    port = FakeExecutionPort(results=(make_execution_result(), make_execution_result()))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    result = await engine.run(make_config(start_date=d1, end_date=d2, warmup_trading_days=60))
+    assert len(result.daily_records) == 2
+    assert len(targets.calls) == 2
+    # 预热日数据确实被读取：被读天数 = 预热 60 + 正式 2
+    assert len(replay.load_day_calls) == 62
 
 
 async def test_weekend_execution_uses_provider_date() -> None:
@@ -70,12 +97,15 @@ async def test_weekend_execution_uses_provider_date() -> None:
     )
     replay = FakeReplayProvider(days={friday: day})
     targets = FakeTargetProvider(
-        batch=make_target_batch(decision_date=friday, planned_execution_date=monday)
+        batch=make_target_batch(
+            decision_date=friday,
+            planned_execution_date=monday,
+            targets=(_keep_target(),),
+        )
     )
     port = FakeExecutionPort(results=(make_execution_result(execution_date=monday),))
     engine = BacktestEngine(replay=replay, targets=targets, execution=port)
     result = await engine.run(make_config(start_date=friday, end_date=friday))
-    # D+1 必须来自提供方（周一），不能用自然日加一（周六）
     assert result.daily_records[0].execution_date == monday
     assert port.received_market_dates == [(monday,)]
 
@@ -117,7 +147,6 @@ async def test_target_arm_mismatch_fails() -> None:
     d1 = date(2026, 1, 5)
     day = make_replay_day(decision_date=d1)
     replay = FakeReplayProvider(days={d1: day})
-    # B 组配置收到 A 组批次
     targets = FakeTargetProvider(batch=make_target_batch(decision_date=d1, experiment_arm=ExperimentArm.A_LLM))
     port = FakeExecutionPort(results=(make_execution_result(),))
     engine = BacktestEngine(replay=replay, targets=targets, execution=port)
@@ -136,11 +165,20 @@ async def test_empty_window_fails() -> None:
         await engine.run(config)
 
 
-@pytest.mark.skip(
-    reason="result_hash 覆盖范围未定：config_hash/result_hash 位于被哈希对象内部，会自我引用，待契约答复"
-)
 async def test_replay_is_deterministic() -> None:
-    """预期：相同 Config 与 Fixture 运行两次，canonical JSON 与 result_hash 完全相同。"""
+    d1 = date(2026, 1, 5)
+    day = make_replay_day(decision_date=d1)
+    replay = FakeReplayProvider(days={d1: day})
+    targets = FakeTargetProvider(
+        batch=make_target_batch(decision_date=d1, targets=(_keep_target(),))
+    )
+    port = FakeExecutionPort(results=(make_execution_result(),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    config = make_config(start_date=d1, end_date=d1)
+    first = await engine.run(config)
+    second = await engine.run(config)
+    assert canonical_result_json(first) == canonical_result_json(second)
+    assert first.summary.result_hash == second.summary.result_hash
 
 
 async def test_zero_volatility_sharpe_none() -> None:
@@ -155,11 +193,10 @@ async def test_zero_volatility_sharpe_none() -> None:
     )
     targets = FakeTargetProvider(
         batches={
-            d1: make_target_batch(decision_date=d1, planned_execution_date=d2),
-            d2: make_target_batch(decision_date=d2, planned_execution_date=d3),
+            d1: make_target_batch(decision_date=d1, planned_execution_date=d2, targets=(_keep_target(),)),
+            d2: make_target_batch(decision_date=d2, planned_execution_date=d3, targets=(_keep_target(),)),
         }
     )
-    # 权益恒定：两个执行结果 total_equity 完全相同
     port = FakeExecutionPort(results=(make_execution_result(), make_execution_result()))
     engine = BacktestEngine(replay=replay, targets=targets, execution=port)
     result = await engine.run(make_config(start_date=d1, end_date=d2))
@@ -179,11 +216,10 @@ async def test_no_orders_fill_rate_none() -> None:
     )
     targets = FakeTargetProvider(
         batches={
-            d1: make_target_batch(decision_date=d1, planned_execution_date=d2),
-            d2: make_target_batch(decision_date=d2, planned_execution_date=d3),
+            d1: make_target_batch(decision_date=d1, planned_execution_date=d2, targets=(_keep_target(),)),
+            d2: make_target_batch(decision_date=d2, planned_execution_date=d3, targets=(_keep_target(),)),
         }
     )
-    # 下单数为 0
     port = FakeExecutionPort(results=(make_execution_result(), make_execution_result()))
     engine = BacktestEngine(replay=replay, targets=targets, execution=port)
     result = await engine.run(make_config(start_date=d1, end_date=d2))
@@ -213,7 +249,6 @@ async def test_fairness_rejects_whole_batch() -> None:
         ports.append(port)
         return port
 
-    # 契约第 8 节要求整批拒绝；契约未定义公平性专属错误码，这里断言通用 BacktestError
     with pytest.raises(BacktestError):
         await run_experiment_arms((config_a, config_b), replay, providers, execution_factory)
     assert ports == []
@@ -233,7 +268,9 @@ async def test_arm_state_isolation() -> None:
     )
     replay = FakeReplayProvider(days={d1: make_replay_day(decision_date=d1)})
     providers = {
-        arm: FakeTargetProvider(batch=make_target_batch(decision_date=d1, experiment_arm=arm))
+        arm: FakeTargetProvider(
+            batch=make_target_batch(decision_date=d1, experiment_arm=arm, targets=(_keep_target(),))
+        )
         for arm in arms
     }
     ports: list[FakeExecutionPort] = []
@@ -244,7 +281,6 @@ async def test_arm_state_isolation() -> None:
         return port
 
     await run_experiment_arms(configs, replay, providers, execution_factory)
-    # 四组各取得独立执行器实例，且各执行一次、互不影响
     assert len(ports) == 4
     assert all(port.calls == 1 for port in ports)
 
@@ -305,3 +341,90 @@ async def test_target_sizing_version_mismatch_fails() -> None:
     config = make_config(start_date=d1, end_date=d1)
     with pytest.raises(BacktestError, match="TARGET_SIZING_VERSION_MISMATCH"):
         await engine.run(config)
+
+
+async def test_execution_date_not_after_decision_date_fails() -> None:
+    d1 = date(2026, 1, 5)
+    day = make_replay_day(decision_date=d1, planned_execution_date=d1)
+    replay = FakeReplayProvider(days={d1: day})
+    targets = FakeTargetProvider(batch=make_target_batch(decision_date=d1, planned_execution_date=d1))
+    port = FakeExecutionPort(results=(make_execution_result(),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    with pytest.raises(BacktestError, match="EXECUTION_DATE_NOT_AFTER_DECISION_DATE"):
+        await engine.run(make_config(start_date=d1, end_date=d1))
+
+
+async def test_decision_cutoff_date_mismatch_fails() -> None:
+    d1 = date(2026, 1, 5)
+    next_day_cutoff = datetime(2026, 1, 6, 15, 0, 0, tzinfo=UTC)
+    day = make_replay_day(decision_date=d1, decision_cutoff=next_day_cutoff)
+    replay = FakeReplayProvider(days={d1: day})
+    targets = FakeTargetProvider(batch=make_target_batch(decision_date=d1))
+    port = FakeExecutionPort(results=(make_execution_result(),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    with pytest.raises(BacktestError, match="DECISION_CUTOFF_DATE_MISMATCH"):
+        await engine.run(make_config(start_date=d1, end_date=d1))
+
+
+async def test_insufficient_warmup_data_fails() -> None:
+    d1 = date(2026, 1, 5)
+    d2 = date(2026, 1, 6)
+    w0 = date(2026, 1, 4)
+    replay = FakeReplayProvider(
+        days={
+            w0: make_replay_day(decision_date=w0, planned_execution_date=d1, features={}),
+            d1: make_replay_day(decision_date=d1, planned_execution_date=d2),
+        }
+    )
+    targets = FakeTargetProvider(batch=make_target_batch(decision_date=d1))
+    port = FakeExecutionPort(results=(make_execution_result(),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    config = make_config(start_date=d1, end_date=d1, warmup_trading_days=3)
+    with pytest.raises(BacktestError, match="INSUFFICIENT_WARMUP_DATA"):
+        await engine.run(config)
+
+
+async def test_target_symbol_coverage_mismatch_fails() -> None:
+    d1 = date(2026, 1, 5)
+    features = {
+        DEFAULT_SYMBOL: make_feature_snapshot(symbol=DEFAULT_SYMBOL),
+        "000001.SZ": make_feature_snapshot(symbol="000001.SZ"),
+    }
+    day = make_replay_day(decision_date=d1, features=features)
+    replay = FakeReplayProvider(days={d1: day})
+    targets = FakeTargetProvider(
+        batch=make_target_batch(
+            decision_date=d1,
+            targets=(_keep_target(),),
+        )
+    )
+    port = FakeExecutionPort(results=(make_execution_result(),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    with pytest.raises(BacktestError, match="TARGET_SYMBOL_COVERAGE_MISMATCH"):
+        await engine.run(make_config(start_date=d1, end_date=d1))
+
+
+async def test_portfolio_equity_depleted_fails() -> None:
+    d1 = date(2026, 1, 5)
+    day = make_replay_day(decision_date=d1)
+    replay = FakeReplayProvider(days={d1: day})
+    targets = FakeTargetProvider(
+        batch=make_target_batch(decision_date=d1, targets=(_keep_target(),))
+    )
+    port = FakeExecutionPort(results=(make_execution_result(total_equity=Decimal(0)),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    with pytest.raises(BacktestError, match="PORTFOLIO_EQUITY_DEPLETED"):
+        await engine.run(make_config(start_date=d1, end_date=d1))
+
+
+async def test_engine_passes_decision_view_without_execution_market() -> None:
+    d1 = date(2026, 1, 5)
+    day = make_replay_day(decision_date=d1)
+    replay = FakeReplayProvider(days={d1: day})
+    targets = FakeTargetProvider(
+        batch=make_target_batch(decision_date=d1, targets=(_keep_target(),))
+    )
+    port = FakeExecutionPort(results=(make_execution_result(),))
+    engine = BacktestEngine(replay=replay, targets=targets, execution=port)
+    await engine.run(make_config(start_date=d1, end_date=d1))
+    assert targets.received_has_execution_market == [False]

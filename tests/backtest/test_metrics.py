@@ -1,16 +1,16 @@
 """回测指标公式测试：不涉及引擎循环，直接调用 build_daily_record 与 summarize。
 
-期望值全部按规格 2026-09-22-engine-tests-spec.md 第 2 节手工计算，不依赖实现输出。
+期望值全部按规格手工计算，不依赖实现输出。
 """
 
 from datetime import date
 from decimal import Decimal
 
-import pytest
-
 from fkqt_jevinvestor.backtest.metrics import build_daily_record, summarize
 from fkqt_jevinvestor.domain.backtest import DailyBacktestRecord
 from tests.backtest.fixtures import make_config, make_execution_result
+
+_INITIAL_CASH = Decimal(1000000)
 
 
 def _record(
@@ -44,9 +44,10 @@ def _record(
 
 
 def _spec_records() -> tuple[DailyBacktestRecord, ...]:
-    """规格第 2 节手算样例：初始资金 1,000,000，逐日权益 1,010,000 / 999,900 / 1,050,000。
+    """规格手算样例：初始资金 1,000,000，逐日权益 1,010,000 / 999,900 / 1,050,000。
 
-    注意：cumulative_return 与 drawdown 目前由手工填入，等契约答复后应改为由构造函数产出。
+    这些记录直接构造，用于 summarize 测试；cumulative_return 与 drawdown 是
+    手算好的期望输入（build_daily_record 的计算另有专门测试）。
     """
     return (
         _record(
@@ -72,9 +73,18 @@ def _spec_records() -> tuple[DailyBacktestRecord, ...]:
 
 
 def test_daily_return_is_exact() -> None:
-    day1 = build_daily_record(Decimal(1000000), make_execution_result(total_equity=Decimal(1010000)))
-    day2 = build_daily_record(Decimal(1010000), make_execution_result(total_equity=Decimal(999900)))
-    day3 = build_daily_record(Decimal(999900), make_execution_result(total_equity=Decimal(1050000)))
+    day1 = build_daily_record(
+        Decimal(1000000), _INITIAL_CASH, Decimal(1000000),
+        make_execution_result(total_equity=Decimal(1010000)),
+    )
+    day2 = build_daily_record(
+        Decimal(1010000), _INITIAL_CASH, Decimal(1010000),
+        make_execution_result(total_equity=Decimal(999900)),
+    )
+    day3 = build_daily_record(
+        Decimal(999900), _INITIAL_CASH, Decimal(1010000),
+        make_execution_result(total_equity=Decimal(1050000)),
+    )
     assert day1.daily_return == Decimal("0.01")
     assert day2.daily_return == Decimal("-0.01")
     assert day3.daily_return == Decimal("0.05010501")
@@ -82,16 +92,31 @@ def test_daily_return_is_exact() -> None:
 
 def test_cumulative_return_and_max_drawdown() -> None:
     summary = summarize(make_config(), _spec_records())
-    # 累计收益 = 1,050,000 / 1,000,000 - 1 = 0.05
     assert summary.cumulative_return == Decimal("0.05")
-    # 最大回撤 = |min(0, -0.01, 0)| = 0.01（非负）
     assert summary.max_drawdown == Decimal("0.01")
 
 
+def test_cumulative_return_and_drawdown_from_builder() -> None:
+    # 新高：回撤为 0，累计收益为正
+    new_high = build_daily_record(
+        Decimal(1000000), _INITIAL_CASH, Decimal(1000000),
+        make_execution_result(total_equity=Decimal(1010000)),
+    )
+    assert new_high.cumulative_return == Decimal("0.01")
+    assert new_high.drawdown == Decimal("0")
+
+    # 回撤：回撤为负，累计收益为负
+    drawdown_day = build_daily_record(
+        Decimal(1010000), _INITIAL_CASH, Decimal(1010000),
+        make_execution_result(total_equity=Decimal(999900)),
+    )
+    assert drawdown_day.cumulative_return == Decimal("-0.0001")
+    assert drawdown_day.drawdown == Decimal("-0.01")
+
+
 def test_turnover_uses_previous_equity() -> None:
-    # 成交额 100,000，成交前权益 1,000,000 → 0.1；成交后总权益 1,100,000 不应作分母
     record = build_daily_record(
-        Decimal(1000000),
+        Decimal(1000000), _INITIAL_CASH, Decimal(1000000),
         make_execution_result(total_equity=Decimal(1100000), gross_traded_value=Decimal(100000)),
     )
     assert record.turnover == Decimal("0.1")
@@ -132,9 +157,7 @@ def test_no_orders_fill_rate_none() -> None:
 
 def test_insufficient_downside_sortino_none() -> None:
     summary = summarize(make_config(), _spec_records())
-    # 收益 0.01 / -0.01 / 0.05010501，只有 1 个负收益 → Sortino 为空
     assert summary.sortino_ratio is None
-    # 夏普仍可计算：mean/std*sqrt(252) ≈ 8.662197312483
     assert summary.sharpe_ratio is not None
     assert abs(summary.sharpe_ratio - Decimal("8.662197312483")) <= Decimal("1e-8")
 
@@ -149,25 +172,15 @@ def test_insufficient_samples_sharpe_none() -> None:
 
 def test_annualized_return_uses_ln() -> None:
     summary = summarize(make_config(), _spec_records())
-    # exp(ln(1.05) * 252 / 3) - 1 = 59.2422413757536...
     assert abs(summary.annualized_return - Decimal("59.2422413758")) <= Decimal("1e-8")
 
 
 def test_quantization_precision() -> None:
     record = build_daily_record(
-        Decimal(999900),
+        Decimal(999900), _INITIAL_CASH, Decimal(999900),
         make_execution_result(total_equity=Decimal(1050000), total_fees=Decimal("12.3400")),
     )
-    # 比率量化到 8 位小数
     assert record.daily_return == Decimal("0.05010501")
     assert record.daily_return.as_tuple().exponent == -8
-    # 金额沿用执行域 4 位小数
     assert record.fees == Decimal("12.3400")
     assert record.fees.as_tuple().exponent == -4
-
-
-@pytest.mark.skip(
-    reason="build_daily_record 签名无法产出 cumulative_return 与 drawdown，待契约答复方案 A/B"
-)
-def test_cumulative_return_and_drawdown_from_builder() -> None:
-    """预期：由构造函数按初始资金与运行峰值算出这两个字段，而不是由调用方手工填入。"""
