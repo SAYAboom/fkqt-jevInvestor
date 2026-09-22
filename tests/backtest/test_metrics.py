@@ -103,7 +103,7 @@ def test_cumulative_return_and_drawdown_from_builder() -> None:
         make_execution_result(total_equity=Decimal(1010000)),
     )
     assert new_high.cumulative_return == Decimal("0.01")
-    assert new_high.drawdown == Decimal("0")
+    assert new_high.drawdown == Decimal(0)
 
     # 回撤：回撤为负，累计收益为负
     drawdown_day = build_daily_record(

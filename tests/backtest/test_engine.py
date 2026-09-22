@@ -12,7 +12,12 @@ import pytest
 from fkqt_jevinvestor.backtest.engine import BacktestEngine, BacktestError
 from fkqt_jevinvestor.backtest.runner import run_experiment_arms
 from fkqt_jevinvestor.backtest.serialization import canonical_result_json
-from fkqt_jevinvestor.domain.backtest import DecisionAction, ExperimentArm, ReplayDay
+from fkqt_jevinvestor.domain.backtest import (
+    DecisionAction,
+    ExperimentArm,
+    ReplayDay,
+    TargetPosition,
+)
 from tests.backtest.fixtures import (
     DEFAULT_SYMBOL,
     FakeExecutionPort,
@@ -29,7 +34,7 @@ from tests.backtest.fixtures import (
 )
 
 
-def _keep_target() -> object:
+def _keep_target() -> TargetPosition:
     return make_target_position(symbol=DEFAULT_SYMBOL, action=DecisionAction.KEEP)
 
 

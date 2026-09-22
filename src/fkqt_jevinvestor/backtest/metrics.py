@@ -5,6 +5,8 @@
 float，结果确定可复现。
 """
 
+import hashlib
+import json
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from fkqt_jevinvestor.domain.backtest import (
@@ -18,6 +20,15 @@ _RATIO_QUANTUM: Decimal = Decimal("0.00000001")
 _AMOUNT_QUANTUM: Decimal = Decimal("0.0001")
 _TRADING_DAYS_PER_YEAR: Decimal = Decimal(252)
 _SQRT_TRADING_DAYS: Decimal = _TRADING_DAYS_PER_YEAR.sqrt()
+
+
+def _canonical_json(payload: object) -> str:
+    """规范化 JSON。参数必须与 serialization.canonical_result_json 完全一致。"""
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _quantize(value: Decimal, quantum: Decimal) -> Decimal:
@@ -60,21 +71,20 @@ def _sortino(returns: list[Decimal]) -> Decimal | None:
 
 def build_daily_record(
     previous_equity: Decimal,
+    initial_cash: Decimal,
+    running_peak_equity: Decimal,
     execution: BacktestExecutionResult,
 ) -> DailyBacktestRecord:
     """把一次执行结果转成一条逐日记录。
 
-    换手率分母是成交前权益 previous_equity，而不是 execution.total_equity。
+    换手率分母是成交前权益 previous_equity，不是 execution.total_equity。
+    cumulative_return 与 drawdown 由本函数按初始资金与运行峰值算出。
     """
     daily_return = execution.total_equity / previous_equity - Decimal(1)
     turnover = execution.gross_traded_value / previous_equity
-
-    # TODO(契约缺口): cumulative_return 需要初始资金，本签名没有该入参。暂填 0，
-    # 数值不正确，等契约答复后再由引擎或扩展签名产出。
-    cumulative_return = Decimal(0)
-    # TODO(契约缺口): drawdown 需要运行峰值权益，本签名没有该入参。暂填 0，
-    # 数值不正确，等契约答复后再由引擎或扩展签名产出。
-    drawdown = Decimal(0)
+    cumulative_return = execution.total_equity / initial_cash - Decimal(1)
+    peak = max(running_peak_equity, execution.total_equity)
+    drawdown = execution.total_equity / peak - Decimal(1)
 
     return DailyBacktestRecord(
         decision_date=execution.decision_date,
@@ -83,8 +93,8 @@ def build_daily_record(
         cash_balance=execution.cash_balance,
         market_value=execution.market_value,
         daily_return=_quantize(daily_return, _RATIO_QUANTUM),
-        cumulative_return=cumulative_return,
-        drawdown=drawdown,
+        cumulative_return=_quantize(cumulative_return, _RATIO_QUANTUM),
+        drawdown=_quantize(drawdown, _RATIO_QUANTUM),
         turnover=_quantize(turnover, _RATIO_QUANTUM),
         fees=_quantize(execution.total_fees, _AMOUNT_QUANTUM),
         submitted_orders=execution.submitted_orders,
@@ -97,7 +107,7 @@ def summarize(
     config: BacktestConfig,
     records: tuple[DailyBacktestRecord, ...],
 ) -> BacktestSummary:
-    """把逐日记录汇总成一份 BacktestSummary。
+    """把逐日记录汇总成一份 BacktestSummary，并计算 config_hash 与 result_hash。
 
     records 为空元组时抛 ValueError：引擎层已有"窗口为空就整批失败"的保证，
     这里收到空列表属于调用错误。
@@ -109,7 +119,6 @@ def summarize(
     returns = [record.daily_return for record in records]
 
     cumulative_return = records[-1].cumulative_return
-    # 年化收益必须走对数路径，避免 Decimal 转 float 的精度丢失。
     annualized_return = (
         (Decimal(1) + cumulative_return).ln()
         * _TRADING_DAYS_PER_YEAR
@@ -134,12 +143,9 @@ def summarize(
             Decimal(filled_orders) / Decimal(submitted_orders), _RATIO_QUANTUM
         )
 
-    # TODO(契约缺口): config_hash/result_hash 的覆盖范围与"自我引用"处理未定。
-    # 字段有 64 字符长度校验，不能留空，暂填 64 个 '0' 占位。
-    config_hash = "0" * 64
-    result_hash = "0" * 64
+    config_hash = _sha256(_canonical_json(config.model_dump(mode="json")))
 
-    return BacktestSummary(
+    provisional = BacktestSummary(
         run_id=config.run_id,
         experiment_arm=config.experiment_arm,
         trading_days=trading_days,
@@ -155,5 +161,18 @@ def summarize(
         rejected_orders=rejected_orders,
         fill_rate=fill_rate,
         config_hash=config_hash,
-        result_hash=result_hash,
+        result_hash="0" * 64,
     )
+
+    # result_hash = 完整结果的规范化 JSON 的 SHA-256，计算前从 summary 排除 result_hash；
+    # config_hash 保留在预映像中。
+    summary_payload = provisional.model_dump(mode="json")
+    summary_payload.pop("result_hash")
+    preimage = {
+        "config": config.model_dump(mode="json"),
+        "daily_records": [record.model_dump(mode="json") for record in records],
+        "summary": summary_payload,
+    }
+    result_hash = _sha256(_canonical_json(preimage))
+
+    return provisional.model_copy(update={"result_hash": result_hash})

@@ -19,6 +19,8 @@ def _sample_result() -> BacktestResult:
     )
     record = build_daily_record(
         Decimal(1000000),
+        Decimal(1000000),
+        Decimal(1000000),
         make_execution_result(total_equity=Decimal(1010000), total_fees=Decimal("12.3400")),
     )
     summary = summarize(config, (record,))
