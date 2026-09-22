@@ -133,3 +133,8 @@ def test_factories_produce_valid_data() -> None:
     config = make_config()
     assert config.initial_cash == Decimal(1000000)
     assert config.dataset_hash == DEFAULT_HASH
+
+
+def test_replay_day_cutoff_follows_decision_date() -> None:
+    day = make_replay_day(decision_date=date(2026, 1, 9))
+    assert day.decision_cutoff.date() == date(2026, 1, 9)

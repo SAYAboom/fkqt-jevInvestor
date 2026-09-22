@@ -205,7 +205,7 @@ def make_execution_market(
 def make_replay_day(
     *,
     decision_date: date = _DEFAULT_DECISION_DATE,
-    decision_cutoff: datetime = _DEFAULT_CUTOFF,
+    decision_cutoff: datetime | None = None,
     planned_execution_date: date = _DEFAULT_EXECUTION_DATE,
     universe_snapshot_hash: str = DEFAULT_HASH,
     market_snapshot_hash: str = DEFAULT_HASH,
@@ -214,10 +214,16 @@ def make_replay_day(
     execution_market: Mapping[str, MarketExecutionSnapshot] | None = None,
 ) -> ReplayDay:
     """构造一天的完整数据（含次日成交行情）。"""
+    if decision_cutoff is None:
+        decision_cutoff = _DEFAULT_CUTOFF.replace(
+            year=decision_date.year,
+            month=decision_date.month,
+            day=decision_date.day,
+        )
     if features is None:
         features = {DEFAULT_SYMBOL: make_feature_snapshot()}
     if execution_market is None:
-        execution_market = {DEFAULT_SYMBOL: make_execution_market()}
+        execution_market = {DEFAULT_SYMBOL: make_execution_market(trade_date=planned_execution_date)}
     return ReplayDay(
         decision_date=decision_date,
         decision_cutoff=decision_cutoff,
