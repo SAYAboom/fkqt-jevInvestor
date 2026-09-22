@@ -154,7 +154,7 @@ def summarize(
         max_drawdown=_quantize(max_drawdown, _RATIO_QUANTUM),
         sharpe_ratio=sharpe_ratio,
         sortino_ratio=sortino_ratio,
-        turnover=turnover,
+        turnover=_quantize(turnover, _RATIO_QUANTUM),
         total_fees=_quantize(total_fees, _AMOUNT_QUANTUM),
         submitted_orders=submitted_orders,
         filled_orders=filled_orders,

@@ -38,7 +38,7 @@ def _validate_arms(
 
     for config in configs:
         if config.experiment_arm not in target_providers:
-            # 公平性失败的错误码契约未定义，消息以 EXPERIMENT_CONFIG_MISMATCH 开头（待确认）。
+            # 契约没有为公平性失败定义专属错误码，因此用消息前缀 EXPERIMENT_CONFIG_MISMATCH 表达；该口径以运行手册为准。
             raise BacktestError(
                 f"EXPERIMENT_CONFIG_MISMATCH: 缺少 {config.experiment_arm.value} 组的目标生成器"
             )
